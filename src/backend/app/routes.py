@@ -21,6 +21,30 @@ def normalize_datetime(value):
     return value.astimezone(timezone.utc)
 
 
+def normalize_meal_text(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def serialize_meal(meal):
+    antonio = normalize_meal_text(getattr(meal, "antonio", None))
+    annalisa = normalize_meal_text(getattr(meal, "annalisa", None))
+    legacy_description = normalize_meal_text(getattr(meal, "description", None))
+    combined = "\n\n".join(part for part in [antonio, annalisa] if part)
+    description = combined or legacy_description
+    return {
+        "id": str(meal.id),
+        "datetime": meal.datetime.isoformat(),
+        "description": description,
+        "antonio": antonio,
+        "annalisa": annalisa,
+        "type_id": str(meal.type_id),
+        "user_id": str(meal.user_id),
+    }
+
+
 @bp.route("/login", methods=["POST"])
 def login():
     data = request.get_json() or {}
@@ -110,29 +134,45 @@ def post_meal():
     data = request.get_json() or {}
     mid = data.get("id")
     dt = data.get("datetime")
-    description = data.get("description")
+    description = normalize_meal_text(data.get("description"))
+    antonio = normalize_meal_text(data.get("antonio"))
+    annalisa = normalize_meal_text(data.get("annalisa"))
     type_id = data.get("type_id")
     user_id = get_jwt_identity()
 
     if not dt or not type_id:
         return jsonify({"msg": "datetime and type_id are required"}), 400
 
+    if antonio is None and description is not None:
+        antonio = description
+    if annalisa is None and description is not None and description.count("\n") > 0:
+        parts = [part.strip() for part in description.split("\n\n") if part.strip()]
+        if len(parts) > 1:
+            annalisa = parts[-1]
+            antonio = parts[0]
+
     try:
         parsed = normalize_datetime(dt)
     except Exception:
         return jsonify({"msg": "invalid datetime format, use ISO format"}), 400
 
+    combined_description = "\n\n".join(part for part in [antonio, annalisa] if part)
+
     if mid:
         meal = Meal.query.get(mid)
         if meal:
             meal.datetime = parsed
-            meal.description = description
+            meal.description = combined_description or description
+            meal.antonio = antonio
+            meal.annalisa = annalisa
             meal.type_id = UUID(type_id)
         else:
             meal = Meal(
                 id=UUID(mid),
                 datetime=parsed,
-                description=description,
+                description=combined_description or description,
+                antonio=antonio,
+                annalisa=annalisa,
                 type_id=UUID(type_id),
                 user_id=UUID(user_id),
             )
@@ -140,7 +180,9 @@ def post_meal():
     else:
         meal = Meal(
             datetime=parsed,
-            description=description,
+            description=combined_description or description,
+            antonio=antonio,
+            annalisa=annalisa,
             type_id=UUID(type_id),
             user_id=UUID(user_id),
         )
@@ -172,15 +214,7 @@ def get_meal():
     meal = Meal.query.get(mid)
     if not meal:
         return jsonify({"msg": "not found"}), 404
-    return jsonify(
-        {
-            "id": str(meal.id),
-            "datetime": meal.datetime.isoformat(),
-            "description": meal.description,
-            "type_id": str(meal.type_id),
-            "user_id": str(meal.user_id),
-        }
-    )
+    return jsonify(serialize_meal(meal))
 
 
 @bp.route("/meals", methods=["GET"])
@@ -209,18 +243,7 @@ def list_meals():
             return jsonify({"msg": "invalid type id"}), 400
 
     meals = q.order_by(Meal.datetime).all()
-    return jsonify(
-        [
-            {
-                "id": str(m.id),
-                "datetime": m.datetime.isoformat(),
-                "description": m.description,
-                "type_id": str(m.type_id),
-                "user_id": str(m.user_id),
-            }
-            for m in meals
-        ]
-    )
+    return jsonify([serialize_meal(m) for m in meals])
 
 
 @bp.route("/copy_meals", methods=["POST"])
@@ -258,6 +281,8 @@ def copy_meals():
         new_meal = Meal(
             datetime=new_dt,
             description=m.description,
+            antonio=m.antonio,
+            annalisa=m.annalisa,
             type_id=m.type_id,
             user_id=UUID(user_id),
         )

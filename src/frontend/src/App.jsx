@@ -82,6 +82,21 @@ function getMealTime(meal) {
   return `${hour}:${minute}`;
 }
 
+function formatMealEntries(meal) {
+  const antonio = (meal?.antonio || '').trim();
+  const annalisa = (meal?.annalisa || '').trim();
+
+  if (antonio || annalisa) {
+    const entries = [];
+    if (antonio) entries.push(`Antonio\n${antonio}`);
+    if (annalisa) entries.push(`Annalisa\n${annalisa}`);
+    return entries.join('\n\n');
+  }
+
+  const legacyDescription = (meal?.description || '').trim();
+  return legacyDescription || 'Pasto';
+}
+
 function mergeRemoteMeals(localMeals, remoteMeals) {
   const merged = [...localMeals];
   const keys = new Set(localMeals.map((meal) => `${meal.datetime}_${meal.type_id}_${meal.id || 'local'}`));
@@ -141,7 +156,7 @@ export default function App() {
     }
   });
   const [modalState, setModalState] = useState({ open: false, meal: null, date: null, type: null, mode: 'edit' });
-  const [form, setForm] = useState({ id: '', type_id: '', date: '', time: '12:00', description: '' });
+  const [form, setForm] = useState({ id: '', type_id: '', date: '', time: '12:00', antonio: '', annalisa: '' });
   const [isAuthenticated, setIsAuthenticated] = useState(Boolean(localStorage.getItem(TOKEN_STORAGE_KEY)));
   const [loginForm, setLoginForm] = useState({
     username: '',
@@ -255,7 +270,8 @@ export default function App() {
       type_id: chosenTypeId,
       date: formatLocalDate(date),
       time: getMealTime(meal),
-      description: meal?.description || '',
+      antonio: meal?.antonio || '',
+      annalisa: meal?.annalisa || '',
     });
   }
 
@@ -265,7 +281,7 @@ export default function App() {
 
   function closeModal() {
     setModalState({ open: false, meal: null, date: null, type: null, mode: 'edit' });
-    setForm({ id: '', type_id: '', date: '', time: '12:00', description: '' });
+    setForm({ id: '', type_id: '', date: '', time: '12:00', antonio: '', annalisa: '' });
   }
 
   function persistMealList(nextMeals) {
@@ -277,12 +293,15 @@ export default function App() {
   async function handleSaveMeal(event) {
     event.preventDefault();
 
-    const trimmedDescription = form.description.trim();
+    const antonio = form.antonio.trim();
+    const annalisa = form.annalisa.trim();
     const nextMeal = {
       id: isValidUuid(form.id) ? form.id : generateId(),
       datetime: formatLocalDateTime(new Date(`${form.date}T00:00:00`), form.time),
       type_id: form.type_id,
-      description: trimmedDescription,
+      antonio,
+      annalisa,
+      description: [antonio, annalisa].filter(Boolean).join('\n\n'),
     };
 
     const localMeals = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || '[]');
@@ -313,6 +332,8 @@ export default function App() {
           datetime: nextMeal.datetime,
           type_id: nextMeal.type_id,
           description: nextMeal.description,
+          antonio: nextMeal.antonio,
+          annalisa: nextMeal.annalisa,
         }),
       });
 
@@ -593,7 +614,7 @@ export default function App() {
                     }}
                   >
                     {meal ? (
-                      <span className="meal-text">{meal.description || 'Pasto'}</span>
+                      <span className="meal-text">{formatMealEntries(meal)}</span>
                     ) : (
                       <span className="plus-sign">+</span>
                     )}
@@ -682,7 +703,7 @@ export default function App() {
             </div>
 
             <div className="summary-text">
-              {modalState.meal?.description || 'Nessuna descrizione'}
+              {modalState.meal ? formatMealEntries(modalState.meal) : 'Nessuna descrizione'}
             </div>
 
             <div className="summary-actions">
@@ -715,12 +736,22 @@ export default function App() {
 
             <form onSubmit={handleSaveMeal} className="meal-form">
               <label>
-                Descrizione
+                Antonio
                 <textarea
-                  rows="4"
-                  value={form.description}
-                  onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))}
-                  placeholder="Es. Pasta al pomodoro, insalata, pollo..."
+                  rows="3"
+                  value={form.antonio}
+                  onChange={(event) => setForm((current) => ({ ...current, antonio: event.target.value }))}
+                  placeholder="Es. Pasta al pomodoro..."
+                />
+              </label>
+
+              <label>
+                Annalisa
+                <textarea
+                  rows="3"
+                  value={form.annalisa}
+                  onChange={(event) => setForm((current) => ({ ...current, annalisa: event.target.value }))}
+                  placeholder="Es. Insalata e pollo..."
                 />
               </label>
 

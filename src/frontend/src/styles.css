@@ -379,11 +379,11 @@ button {
 
 .meal-text {
   max-width: 100%;
-  white-space: normal;
+  white-space: pre-line;
   overflow-wrap: anywhere;
   font-size: 0.9rem;
   font-weight: 600;
-  line-height: 1.25;
+  line-height: 1.35;
 }
 
 .modal-overlay {

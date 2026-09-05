@@ -20,6 +20,30 @@ def normalize_datetime(value):
     return value.astimezone(timezone.utc)
 
 
+def normalize_meal_text(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def serialize_meal(meal):
+    antonio = normalize_meal_text(getattr(meal, "antonio", None))
+    annalisa = normalize_meal_text(getattr(meal, "annalisa", None))
+    legacy_description = normalize_meal_text(getattr(meal, "description", None))
+    combined = "\n\n".join(part for part in [antonio, annalisa] if part)
+    description = combined or legacy_description
+    return {
+        "id": str(meal.id),
+        "datetime": meal.datetime.isoformat(),
+        "description": description,
+        "antonio": antonio,
+        "annalisa": annalisa,
+        "type_id": str(meal.type_id),
+        "user_id": str(meal.user_id),
+    }
+
+
 @bp.route("/login", methods=["POST"])
 def login():
     data = request.get_json() or {}
@@ -114,15 +138,7 @@ def get_meal():
     meal = Meal.query.get(mid)
     if not meal:
         return jsonify({"msg": "not found"}), 404
-    return jsonify(
-        {
-            "id": str(meal.id),
-            "datetime": meal.datetime.isoformat(),
-            "description": meal.description,
-            "type_id": str(meal.type_id),
-            "user_id": str(meal.user_id),
-        }
-    )
+    return jsonify(serialize_meal(meal))
 
 
 @bp.route("/meals", methods=["GET"])
@@ -151,18 +167,7 @@ def list_meals():
             return jsonify({"msg": "invalid type id"}), 400
 
     meals = q.order_by(Meal.datetime).all()
-    return jsonify(
-        [
-            {
-                "id": str(m.id),
-                "datetime": m.datetime.isoformat(),
-                "description": m.description,
-                "type_id": str(m.type_id),
-                "user_id": str(m.user_id),
-            }
-            for m in meals
-        ]
-    )
+    return jsonify([serialize_meal(m) for m in meals])
 
 
 @bp.route("/copy_meals", methods=["POST"])
@@ -203,6 +208,8 @@ def copy_meals():
         new_meal = Meal(
             datetime=new_dt,
             description=m.description,
+            antonio=m.antonio,
+            annalisa=m.annalisa,
             type_id=m.type_id,
             user_id=UUID(user_id),
         )
