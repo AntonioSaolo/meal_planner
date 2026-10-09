@@ -404,12 +404,26 @@ def copy_meals():
         selected_columns.extend(["antonio", "annalisa"])
     rows = db.session.execute(
         text(
-            f"SELECT {', '.join(selected_columns)} FROM meals WHERE user_id = :user_id AND datetime >= :s_from AND datetime <= :s_to"
+            f"SELECT {', '.join(selected_columns)} FROM meals WHERE datetime >= :s_from AND datetime <= :s_to"
         ),
-        {"user_id": str(user_id), "s_from": s_from, "s_to": s_to},
+        {"s_from": s_from, "s_to": s_to},
     ).fetchall()
+    try:
+        preview = [serialize_meal_row(r) for r in rows[:5]]
+    except Exception:
+        preview = []
+    current_app.logger.warning(
+        "copy_meals called user=%s s_from=%s s_to=%s d_from=%s d_to=%s rows_found=%d preview=%s",
+        str(user_id),
+        s_from,
+        s_to,
+        d_from,
+        d_to,
+        len(rows),
+        preview,
+    )
     if not rows:
-        return jsonify({"copied": 0}), 200
+        return jsonify({"copied": 0, "selected": 0, "preview": []}), 200
 
     delta = d_from - s_from
     copied = 0
@@ -437,7 +451,7 @@ def copy_meals():
                     "antonio": fields["antonio"],
                     "annalisa": fields["annalisa"],
                     "type_id": str(record["type_id"]),
-                    "user_id": str(user_id),
+                    "user_id": str(record.get("user_id")),
                 },
             )
         else:
@@ -450,10 +464,10 @@ def copy_meals():
                     "dt": new_dt,
                     "description": fields["description"],
                     "type_id": str(record["type_id"]),
-                    "user_id": str(user_id),
+                    "user_id": str(record.get("user_id")),
                 },
             )
         copied += 1
 
     db.session.commit()
-    return jsonify({"copied": copied}), 201
+    return jsonify({"copied": copied, "selected": len(rows), "preview": preview}), 201

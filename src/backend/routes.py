@@ -191,10 +191,8 @@ def copy_meals():
     except Exception:
         return jsonify({"msg": "invalid datetime format, use ISO format"}), 400
 
-    # load source meals for this user
-    src_meals = Meal.query.filter(
-        Meal.user_id == UUID(user_id), Meal.datetime >= s_from, Meal.datetime <= s_to
-    ).all()
+    # load source meals (do not restrict to the authenticated user)
+    src_meals = Meal.query.filter(Meal.datetime >= s_from, Meal.datetime <= s_to).all()
     if not src_meals:
         return jsonify({"copied": 0}), 200
 
@@ -211,7 +209,7 @@ def copy_meals():
             antonio=m.antonio,
             annalisa=m.annalisa,
             type_id=m.type_id,
-            user_id=UUID(user_id),
+            user_id=m.user_id,
         )
         db.session.add(new_meal)
         copied += 1
