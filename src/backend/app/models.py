@@ -67,13 +67,18 @@ class Type(db.Model):
     name = Column(String(30), unique=True, nullable=False, index=True)
 
 
+class MealField(db.Model):
+    __tablename__ = "meal_fields"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(80), unique=True, nullable=False, index=True)
+    idx = Column(Integer, nullable=False, default=1, index=True)
+
+
 class Meal(db.Model):
     __tablename__ = "meals"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     datetime = Column(DateTime(timezone=True), nullable=False, index=True)
     description = Column(Text, nullable=True)
-    antonio = Column(Text, nullable=True)
-    annalisa = Column(Text, nullable=True)
     type_id = Column(UUID(as_uuid=True), ForeignKey("types.id"), nullable=False)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     type = db.relationship("Type")

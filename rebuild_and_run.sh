@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+CREATE_DEFAULT_ADMIN="${CREATE_DEFAULT_ADMIN:-true}"
+if [[ "${1:-}" == "--no-admin" ]]; then
+  CREATE_DEFAULT_ADMIN="false"
+  shift
+fi
+
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 if [[ ! -x "$PYTHON_BIN" ]]; then
   PYTHON_BIN="$(command -v python3 || command -v python || true)"
@@ -32,18 +38,23 @@ if [[ "$(docker inspect -f '{{.State.Health.Status}}' "$DB_CONTAINER_NAME" 2>/de
   exit 1
 fi
 
-printf '\n==> Ensuring default admin user exists...\n'
-if [[ -n "$PYTHON_BIN" ]]; then
-  "$PYTHON_BIN" "$ROOT_DIR/scripts/create_user.py" \
-    --database-url "$DB_URL" \
-    --username admin \
-    --password admin \
-    --email admin@example.com \
-    --create-table || \
-    echo "Admin user already exists or creation was skipped." >&2
+printf '\n==> Default admin creation flag: %s\n' "$CREATE_DEFAULT_ADMIN"
+if [[ "$CREATE_DEFAULT_ADMIN" == "true" ]]; then
+  printf '\n==> Ensuring default admin user exists...\n'
+  if [[ -n "$PYTHON_BIN" ]]; then
+    "$PYTHON_BIN" "$ROOT_DIR/scripts/create_user.py" \
+      --database-url "$DB_URL" \
+      --username admin \
+      --password admin \
+      --email admin@example.com \
+      --create-table || \
+      echo "Admin user already exists or creation was skipped." >&2
+  else
+    echo "Python interpreter not found; cannot create the admin user." >&2
+    exit 1
+  fi
 else
-  echo "Python interpreter not found; cannot create the admin user." >&2
-  exit 1
+  printf '\n==> Skipping default admin creation because CREATE_DEFAULT_ADMIN=%s\n' "$CREATE_DEFAULT_ADMIN"
 fi
 
 printf '\n==> Containers are up.\n'

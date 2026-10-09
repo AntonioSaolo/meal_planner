@@ -19,6 +19,9 @@ COPY src/backend ./src/backend
 COPY --from=frontend-build /app/frontend/dist ./src/backend/static
 
 WORKDIR /app/src/backend
+COPY src/backend/docker-entrypoint.sh ./docker-entrypoint.sh
+RUN chmod +x ./docker-entrypoint.sh
 EXPOSE 8000
 
-CMD ["sh", "-c", "python main.py init-db && exec python main.py"]
+ENTRYPOINT ["./docker-entrypoint.sh"]
+CMD ["python", "main.py"]

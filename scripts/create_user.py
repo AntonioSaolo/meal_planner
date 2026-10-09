@@ -80,7 +80,7 @@ def user_exists(conn, username):
     return row[0] if row else None
 
 
-def upsert_user(conn, username, password, email=None):
+def upsert_user(conn, username, password, email=None, force=False):
     if register_uuid is not None:
         register_uuid()
     cur = conn.cursor()
@@ -88,12 +88,18 @@ def upsert_user(conn, username, password, email=None):
     pw_hash = generate_password_hash(password)
     try:
         if user_id:
-            cur.execute(
-                "UPDATE users SET password_hash = %s, email = %s WHERE id = %s",
-                (pw_hash, email, user_id),
+            if force:
+                cur.execute(
+                    "UPDATE users SET password_hash = %s, email = %s WHERE id = %s",
+                    (pw_hash, email, user_id),
+                )
+                conn.commit()
+                print(f"Updated user '{username}' (id={user_id})")
+                return user_id
+
+            print(
+                f"User '{username}' already exists (id={user_id}); leaving it untouched"
             )
-            conn.commit()
-            print(f"Updated user '{username}' (id={user_id})")
             return user_id
 
         user_id = uuid.uuid4()
@@ -126,6 +132,11 @@ def main(argv=None):
     )
     p.add_argument(
         "--create-table", action="store_true", help="Create users table if missing"
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing user with the same username",
     )
 
     args = p.parse_args(argv)
@@ -162,7 +173,7 @@ def main(argv=None):
         if args.create_table:
             create_users_table_if_missing(conn)
 
-        upsert_user(conn, username, password, email=email)
+        upsert_user(conn, username, password, email=email, force=args.force)
     finally:
         conn.close()
 

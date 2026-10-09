@@ -13,13 +13,25 @@ const API_BASE_URL = (() => {
 
   return 'http://localhost:8000';
 })();
-const LOCAL_STORAGE_KEY = 'meal-planner-local-meals';
 const USER_STORAGE_KEY = 'meal_planner_user';
 const TOKEN_STORAGE_KEY = 'meal_planner_token';
 const DAY_NAMES = ['Lunedì', 'Martedì', 'Mercoledì', 'Giovedì', 'Venerdì', 'Sabato', 'Domenica'];
+const DEFAULT_MEAL_NAMES = ['Antonio', 'Annalisa'];
 
-function getLocalMealsStorageKey(username = localStorage.getItem(USER_STORAGE_KEY) || 'anonymous') {
-  return `${LOCAL_STORAGE_KEY}-${username}`;
+function normalizeMealNames(names) {
+  if (!Array.isArray(names)) {
+    return [...DEFAULT_MEAL_NAMES];
+  }
+
+  const cleaned = names
+    .map((name) => String(name || '').trim())
+    .filter(Boolean);
+
+  return cleaned.length ? cleaned : [...DEFAULT_MEAL_NAMES];
+}
+
+function getMealNames() {
+  return [...DEFAULT_MEAL_NAMES];
 }
 
 function startOfWeek(date) {
@@ -87,15 +99,67 @@ function getMealTime(meal) {
   return `${hour}:${minute}`;
 }
 
-function formatMealEntries(meal) {
-  const antonio = (meal?.antonio || '').trim();
-  const annalisa = (meal?.annalisa || '').trim();
+function parseMealEntries(meal, names = DEFAULT_MEAL_NAMES) {
+  const normalizedNames = normalizeMealNames(names);
+  const values = {};
+  normalizedNames.forEach((name) => {
+    values[name] = '';
+  });
 
-  if (antonio || annalisa) {
-    const entries = [];
-    if (antonio) entries.push(`Antonio\n${antonio}`);
-    if (annalisa) entries.push(`Annalisa\n${annalisa}`);
-    return entries.join('\n\n');
+  if (!meal) {
+    return values;
+  }
+
+  const jsonEntries = [];
+  if (meal.entries && typeof meal.entries === 'object') {
+    jsonEntries.push(...Object.entries(meal.entries));
+  }
+
+  if (meal.antonio !== undefined || meal.annalisa !== undefined) {
+    const legacyNames = ['Antonio', 'Annalisa'];
+    legacyNames.forEach((name, index) => {
+      const legacyValue = index === 0 ? meal.antonio : meal.annalisa;
+      if (legacyValue !== undefined && legacyValue !== null) {
+        jsonEntries.push([name, legacyValue]);
+      }
+    });
+  }
+
+  if (meal.description) {
+    try {
+      const parsed = JSON.parse(meal.description);
+      if (parsed && typeof parsed === 'object') {
+        Object.entries(parsed).forEach(([name, value]) => {
+          jsonEntries.push([name, value]);
+        });
+      }
+    } catch (error) {
+      // no-op: legacy description text is still valid as a fallback
+    }
+  }
+
+  jsonEntries.forEach(([name, value]) => {
+    if (!name) return;
+    const directMatch = normalizedNames.includes(name);
+    const targetName = directMatch ? name : normalizedNames[jsonEntries.findIndex(([candidate]) => candidate === name)] || name;
+    values[targetName] = String(value || '');
+  });
+
+  return values;
+}
+
+function formatMealEntries(meal, names = DEFAULT_MEAL_NAMES) {
+  const entries = parseMealEntries(meal, names);
+  const normalizedNames = normalizeMealNames(names);
+  const visibleEntries = normalizedNames
+    .map((name) => {
+      const value = (entries[name] || '').trim();
+      return value ? `${name}\n${value}` : null;
+    })
+    .filter(Boolean);
+
+  if (visibleEntries.length) {
+    return visibleEntries.join('\n\n');
   }
 
   const legacyDescription = (meal?.description || '').trim();
@@ -152,16 +216,11 @@ function normalizeLocalMeal(meal) {
 export default function App() {
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date()));
   const [types, setTypes] = useState([]);
-  const [meals, setMeals] = useState(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(getLocalMealsStorageKey()) || '[]');
-      return Array.isArray(saved) ? saved.map(normalizeLocalMeal) : [];
-    } catch (error) {
-      return [];
-    }
-  });
+  const [meals, setMeals] = useState([]);
   const [modalState, setModalState] = useState({ open: false, meal: null, date: null, type: null, mode: 'edit' });
-  const [form, setForm] = useState({ id: '', type_id: '', date: '', time: '12:00', antonio: '', annalisa: '', continueToNextMeal: false });
+  const [saveError, setSaveError] = useState('');
+  const [mealNames, setMealNames] = useState([...DEFAULT_MEAL_NAMES]);
+  const [form, setForm] = useState({ id: '', type_id: '', date: '', time: '12:00', entries: {}, continueToNextMeal: false });
   const [isAuthenticated, setIsAuthenticated] = useState(Boolean(localStorage.getItem(TOKEN_STORAGE_KEY)));
   const [loginForm, setLoginForm] = useState({
     username: '',
@@ -173,14 +232,14 @@ export default function App() {
   const [copyModal, setCopyModal] = useState({ open: false, type: 'week', sourceFrom: '', sourceTo: '', destFrom: '', destTo: '' });
 
   useEffect(() => {
+    loadMealFields(localStorage.getItem(TOKEN_STORAGE_KEY));
+  }, []);
+
+  useEffect(() => {
     if (isAuthenticated) {
       loadPlannerData();
     }
   }, [weekStart, isAuthenticated]);
-
-  useEffect(() => {
-    localStorage.setItem(getLocalMealsStorageKey(), JSON.stringify(meals));
-  }, [meals]);
 
   async function loginWithCredentials(event) {
     event.preventDefault();
@@ -213,13 +272,31 @@ export default function App() {
     }
   }
 
+  async function loadMealFields(token = localStorage.getItem(TOKEN_STORAGE_KEY)) {
+    try {
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const response = await fetch(`${API_BASE_URL}/meal-fields`, { headers });
+      if (!response.ok) throw new Error('Cannot load meal fields');
+      const data = await response.json();
+      const names = normalizeMealNames(Array.isArray(data) ? data.map((item) => item && typeof item === 'object' ? item.name : item) : DEFAULT_MEAL_NAMES);
+      setMealNames(names);
+      return names;
+    } catch (error) {
+      const fallback = [...DEFAULT_MEAL_NAMES];
+      setMealNames(fallback);
+      return fallback;
+    }
+  }
+
   async function loadPlannerData(token = localStorage.getItem(TOKEN_STORAGE_KEY)) {
     if (!token) {
       setTypes([]);
+      setMealNames([...DEFAULT_MEAL_NAMES]);
       return;
     }
 
     await fetchTypes(token);
+    await loadMealFields(token);
     await loadMealsForWeek(weekStart, token);
   }
 
@@ -244,11 +321,10 @@ export default function App() {
       const response = await fetch(`${API_BASE_URL}/meals?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, { headers });
       if (!response.ok) throw new Error('Cannot load meals');
       const remoteMeals = await response.json();
-      const localMeals = JSON.parse(localStorage.getItem(getLocalMealsStorageKey()) || '[]');
-      setMeals(mergeRemoteMeals(Array.isArray(localMeals) ? localMeals : [], Array.isArray(remoteMeals) ? remoteMeals : []));
+      setMeals(Array.isArray(remoteMeals) ? remoteMeals.map(normalizeLocalMeal) : []);
     } catch (error) {
-      const localMeals = JSON.parse(localStorage.getItem(getLocalMealsStorageKey()) || '[]');
-      setMeals(Array.isArray(localMeals) ? localMeals : []);
+      setMeals([]);
+      setSaveError(error.message || 'Impossibile caricare i pasti dal backend.');
     }
   }
 
@@ -269,21 +345,22 @@ export default function App() {
 
   function openModal(date, type, meal, shouldContinue = false) {
     const chosenTypeId = type?.id || meal?.type_id || '';
+    const selectedMealNames = mealNames.length ? mealNames : DEFAULT_MEAL_NAMES;
+    const entries = parseMealEntries(meal, selectedMealNames);
     setModalState({ open: true, meal, date, type, mode: 'edit' });
     setForm({
       id: meal?.id || '',
       type_id: chosenTypeId,
       date: formatLocalDate(date),
       time: getMealTime(meal),
-      antonio: meal?.antonio || '',
-      annalisa: meal?.annalisa || '',
+      entries,
       continueToNextMeal: Boolean(shouldContinue),
     });
   }
 
   function closeModal() {
     setModalState({ open: false, meal: null, date: null, type: null, mode: 'edit' });
-    setForm({ id: '', type_id: '', date: '', time: '12:00', antonio: '', annalisa: '', continueToNextMeal: false });
+    setForm({ id: '', type_id: '', date: '', time: '12:00', entries: {}, continueToNextMeal: false });
   }
 
   function getNextTypeForDate(date, currentTypeId) {
@@ -316,29 +393,39 @@ export default function App() {
   function persistMealList(nextMeals) {
     const normalized = Array.isArray(nextMeals) ? nextMeals.map(normalizeLocalMeal) : [];
     setMeals(normalized);
-    localStorage.setItem(getLocalMealsStorageKey(), JSON.stringify(normalized));
   }
 
   async function handleSaveMeal(event) {
     event.preventDefault();
+    setSaveError('');
 
-    const antonio = form.antonio.trim();
-    const annalisa = form.annalisa.trim();
+    const selectedMealNames = normalizeMealNames(mealNames);
+    const entries = {};
+    selectedMealNames.forEach((name) => {
+      entries[name] = String(form.entries[name] || '').trim();
+    });
+
+    setMealNames(selectedMealNames);
+
+    const descriptionPayload = Object.fromEntries(
+      Object.entries(entries).filter(([, value]) => value)
+    );
+
     const nextMeal = {
       id: isValidUuid(form.id) ? form.id : generateId(),
       datetime: formatLocalDateTime(new Date(`${form.date}T00:00:00`), form.time),
       type_id: form.type_id,
-      antonio,
-      annalisa,
-      description: [antonio, annalisa].filter(Boolean).join('\n\n'),
+      entries,
+      description: Object.keys(descriptionPayload).length ? JSON.stringify(descriptionPayload) : '',
+      antonio: entries[selectedMealNames[0]] || '',
+      annalisa: entries[selectedMealNames[1]] || '',
     };
 
-    const localMeals = JSON.parse(localStorage.getItem(getLocalMealsStorageKey()) || '[]');
-    const existingIndex = (Array.isArray(localMeals) ? localMeals : []).findIndex(
+    const existingIndex = meals.findIndex(
       (meal) => meal.id === nextMeal.id || (meal.type_id === nextMeal.type_id && meal.datetime.slice(0, 10) === nextMeal.datetime.slice(0, 10)),
     );
 
-    let updatedMeals = Array.isArray(localMeals) ? [...localMeals] : [];
+    let updatedMeals = [...meals];
     if (existingIndex >= 0) {
       updatedMeals[existingIndex] = { ...updatedMeals[existingIndex], ...nextMeal };
     } else {
@@ -363,6 +450,8 @@ export default function App() {
           description: nextMeal.description,
           antonio: nextMeal.antonio,
           annalisa: nextMeal.annalisa,
+          entries: descriptionPayload,
+          meal_names: selectedMealNames,
         }),
       });
 
@@ -370,8 +459,11 @@ export default function App() {
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.msg || 'Impossibile salvare il pasto');
       }
+
+      setSaveError('');
     } catch (error) {
-      console.warn('Salvataggio locale non sincronizzato con il backend:', error);
+      setSaveError(error.message || 'Errore durante il salvataggio del pasto.');
+      console.error('Errore di salvataggio del pasto:', error);
     }
 
     if (form.continueToNextMeal) {
@@ -403,11 +495,15 @@ export default function App() {
         });
 
         if (!response.ok) {
-          throw new Error('Delete failed');
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.msg || 'Delete failed');
         }
       }
+
+      setSaveError('');
     } catch (error) {
-      console.warn('Local-only delete used because backend is unavailable or protected.', error);
+      setSaveError(error.message || 'Errore durante l’eliminazione del pasto.');
+      console.error('Errore di eliminazione del pasto:', error);
     }
 
     closeModal();
@@ -420,6 +516,7 @@ export default function App() {
     setIsAuthenticated(false);
     setTypes([]);
     setMeals([]);
+    setMealNames([...DEFAULT_MEAL_NAMES]);
     setLoginForm({ username: '', password: '' });
     setShowPassword(false);
   }
@@ -585,6 +682,11 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
+        {saveError && (
+          <div className="error-banner" role="alert">
+            {saveError}
+          </div>
+        )}
         <div className="week-navigation" aria-label="Navigazione settimana">
           <button type="button" className="nav-button" onClick={() => setWeekStart((current) => addDays(current, -7))} aria-label="Settimana precedente">
             ←
@@ -653,7 +755,7 @@ export default function App() {
                     }}
                   >
                     {meal ? (
-                      <span className="meal-text">{formatMealEntries(meal)}</span>
+                      <span className="meal-text">{formatMealEntries(meal, mealNames)}</span>
                     ) : (
                       <span className="plus-sign">+</span>
                     )}
@@ -743,25 +845,25 @@ export default function App() {
             </div>
 
             <form onSubmit={handleSaveMeal} className="meal-form">
-              <label>
-                Antonio
-                <textarea
-                  rows="3"
-                  value={form.antonio}
-                  onChange={(event) => setForm((current) => ({ ...current, antonio: event.target.value }))}
-                  placeholder="Es. Pasta al pomodoro..."
-                />
-              </label>
-
-              <label>
-                Annalisa
-                <textarea
-                  rows="3"
-                  value={form.annalisa}
-                  onChange={(event) => setForm((current) => ({ ...current, annalisa: event.target.value }))}
-                  placeholder="Es. Insalata e pollo..."
-                />
-              </label>
+              {(normalizeMealNames(mealNames)).map((name) => (
+                <label key={name}>
+                  {name}
+                  <textarea
+                    rows="3"
+                    value={form.entries?.[name] || ''}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        entries: {
+                          ...current.entries,
+                          [name]: event.target.value,
+                        },
+                      }))
+                    }
+                    placeholder="Es. Pasta al pomodoro..."
+                  />
+                </label>
+              ))}
 
               <label className="checkbox-row">
                 <input

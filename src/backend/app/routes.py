@@ -1,11 +1,14 @@
+import json
+
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta, timezone
 from .extensions import db
-from .models import User, Meal, Type
+from .models import User, Meal, Type, MealField
 import os
-from uuid import UUID
+from uuid import UUID, uuid4
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 
 bp = Blueprint("api", __name__)
@@ -30,34 +33,87 @@ def normalize_meal_text(value):
 
 def build_meal_fields(payload):
     description = normalize_meal_text(payload.get("description"))
-    antonio = normalize_meal_text(payload.get("antonio"))
-    annalisa = normalize_meal_text(payload.get("annalisa"))
+    raw_entries = (
+        payload.get("entries") if isinstance(payload.get("entries"), dict) else {}
+    )
+    compact_entries = {}
+    for key, value in raw_entries.items():
+        cleaned = normalize_meal_text(value)
+        if cleaned is not None:
+            compact_entries[str(key)] = cleaned
 
-    if antonio is not None or annalisa is not None:
-        combined = "\n\n".join(part for part in [antonio, annalisa] if part)
-        description = combined or description
+    if compact_entries:
+        description = json.dumps(compact_entries, ensure_ascii=False)
     elif description is not None:
         description = description
 
     return {
         "description": description,
-        "antonio": antonio,
-        "annalisa": annalisa,
+        "entries": compact_entries,
+    }
+
+
+def meal_table_columns():
+    try:
+        inspector = inspect(db.engine)
+        return {column["name"] for column in inspector.get_columns("meals")}
+    except Exception:
+        return set()
+
+
+def meal_supports_split_fields():
+    columns = meal_table_columns()
+    return {"antonio", "annalisa"}.issubset(columns)
+
+
+def serialize_meal_row(row):
+    values = row._mapping if hasattr(row, "_mapping") else row
+    description = values.get("description")
+    parsed_entries = {}
+    try:
+        if isinstance(description, str) and description.strip():
+            parsed = json.loads(description)
+            if isinstance(parsed, dict):
+                parsed_entries = {
+                    str(key): normalize_meal_text(value) or ""
+                    for key, value in parsed.items()
+                }
+    except Exception:
+        parsed_entries = {}
+
+    if parsed_entries:
+        return {
+            "id": str(values["id"]),
+            "datetime": values["datetime"].isoformat(),
+            "description": json.dumps(parsed_entries, ensure_ascii=False),
+            "antonio": None,
+            "annalisa": None,
+            "type_id": str(values["type_id"]),
+            "user_id": str(values["user_id"]),
+            "entries": parsed_entries,
+        }
+
+    legacy_description = normalize_meal_text(description)
+    return {
+        "id": str(values["id"]),
+        "datetime": values["datetime"].isoformat(),
+        "description": legacy_description,
+        "antonio": None,
+        "annalisa": None,
+        "type_id": str(values["type_id"]),
+        "user_id": str(values["user_id"]),
+        "entries": {},
     }
 
 
 def serialize_meal(meal):
-    antonio = normalize_meal_text(getattr(meal, "antonio", None))
-    annalisa = normalize_meal_text(getattr(meal, "annalisa", None))
-    legacy_description = normalize_meal_text(getattr(meal, "description", None))
-    combined = "\n\n".join(part for part in [antonio, annalisa] if part)
-    description = combined or legacy_description
+    description = normalize_meal_text(getattr(meal, "description", None))
     return {
         "id": str(meal.id),
         "datetime": meal.datetime.isoformat(),
         "description": description,
-        "antonio": antonio,
-        "annalisa": annalisa,
+        "antonio": None,
+        "annalisa": None,
         "type_id": str(meal.type_id),
         "user_id": str(meal.user_id),
     }
@@ -80,6 +136,25 @@ def login():
         identity=str(user.id), expires_delta=timedelta(days=expires_days)
     )
     return jsonify({"access_token": access_token}), 200
+
+
+@bp.route("/meal-fields", methods=["GET"])
+@jwt_required(optional=True)
+def get_meal_fields():
+    rows = MealField.query.order_by(MealField.idx.asc(), MealField.name.asc()).all()
+    if not rows:
+        from seed_default_data import parse_configured_meal_names
+
+        return jsonify(
+            [
+                {"id": str(i), "name": name, "idx": i + 1}
+                for i, name in enumerate(parse_configured_meal_names())
+            ]
+        )
+
+    return jsonify(
+        [{"id": str(field.id), "name": field.name, "idx": field.idx} for field in rows]
+    )
 
 
 @bp.route("/types", methods=["GET"])
@@ -156,8 +231,6 @@ def post_meal():
     user_id = get_jwt_identity()
     fields = build_meal_fields(data)
     description = fields["description"]
-    antonio = fields["antonio"]
-    annalisa = fields["annalisa"]
 
     if not dt or not type_id:
         return jsonify({"msg": "datetime and type_id are required"}), 400
@@ -167,40 +240,47 @@ def post_meal():
     except Exception:
         return jsonify({"msg": "invalid datetime format, use ISO format"}), 400
 
+    meal_id = UUID(mid) if mid else uuid4()
+
     if mid:
-        meal = Meal.query.get(mid)
-        if meal and str(meal.user_id) != str(user_id):
+        existing = db.session.execute(
+            text(
+                "SELECT id, user_id, datetime, description, type_id FROM meals WHERE id = :meal_id"
+            ),
+            {"meal_id": str(mid)},
+        ).fetchone()
+        if existing and str(existing.user_id) != str(user_id):
             return jsonify({"msg": "forbidden"}), 403
-        if meal:
-            meal.datetime = parsed
-            meal.description = description
-            meal.antonio = antonio
-            meal.annalisa = annalisa
-            meal.type_id = UUID(type_id)
-        else:
-            meal = Meal(
-                id=UUID(mid),
-                datetime=parsed,
-                description=description,
-                antonio=antonio,
-                annalisa=annalisa,
-                type_id=UUID(type_id),
-                user_id=UUID(user_id),
+        if existing:
+            db.session.execute(
+                text(
+                    "UPDATE meals SET datetime = :dt, description = :description, type_id = :type_id WHERE id = :meal_id"
+                ),
+                {
+                    "dt": parsed,
+                    "description": description,
+                    "type_id": str(type_id),
+                    "meal_id": str(mid),
+                },
             )
-            db.session.add(meal)
-    else:
-        meal = Meal(
-            datetime=parsed,
-            description=description,
-            antonio=antonio,
-            annalisa=annalisa,
-            type_id=UUID(type_id),
-            user_id=UUID(user_id),
-        )
-        db.session.add(meal)
+            db.session.commit()
+            return jsonify({"id": str(mid)}), 201
+
+    db.session.execute(
+        text(
+            "INSERT INTO meals (id, datetime, description, type_id, user_id) VALUES (:id, :dt, :description, :type_id, :user_id)"
+        ),
+        {
+            "id": str(meal_id),
+            "dt": parsed,
+            "description": description,
+            "type_id": str(type_id),
+            "user_id": str(user_id),
+        },
+    )
 
     db.session.commit()
-    return jsonify({"id": str(meal.id)}), 201
+    return jsonify({"id": str(meal_id)}), 201
 
 
 @bp.route("/meal", methods=["DELETE"])
@@ -210,12 +290,19 @@ def delete_meal():
     user_id = get_jwt_identity()
     if not mid:
         return jsonify({"msg": "id required"}), 400
-    meal = Meal.query.get(mid)
-    if not meal:
+
+    result = db.session.execute(
+        text("SELECT id, user_id FROM meals WHERE id = :meal_id"),
+        {"meal_id": str(mid)},
+    ).fetchone()
+    if not result:
         return jsonify({"msg": "not found"}), 404
-    if str(meal.user_id) != str(user_id):
+    if str(result.user_id) != str(user_id):
         return jsonify({"msg": "forbidden"}), 403
-    db.session.delete(meal)
+
+    db.session.execute(
+        text("DELETE FROM meals WHERE id = :meal_id"), {"meal_id": str(mid)}
+    )
     db.session.commit()
     return jsonify({"msg": "deleted"}), 200
 
@@ -225,10 +312,17 @@ def get_meal():
     mid = request.args.get("id")
     if not mid:
         return jsonify({"msg": "id required"}), 400
-    meal = Meal.query.get(mid)
-    if not meal:
+
+    selected_columns = ["id", "datetime", "description", "type_id", "user_id"]
+    if meal_supports_split_fields():
+        selected_columns.extend(["antonio", "annalisa"])
+    row = db.session.execute(
+        text(f"SELECT {', '.join(selected_columns)} FROM meals WHERE id = :meal_id"),
+        {"meal_id": str(mid)},
+    ).fetchone()
+    if not row:
         return jsonify({"msg": "not found"}), 404
-    return jsonify(serialize_meal(meal))
+    return jsonify(serialize_meal_row(row))
 
 
 @bp.route("/meals", methods=["GET"])
@@ -238,30 +332,51 @@ def list_meals():
     to = request.args.get("to")
     type_id = request.args.get("type")
     current_user_id = get_jwt_identity()
+    explicit_user_id = request.args.get("user_id")
+    scope = request.args.get("scope", "all")
 
-    q = Meal.query
-    if current_user_id:
-        q = q.filter(Meal.user_id == UUID(current_user_id))
+    columns = ["id", "datetime", "description", "type_id", "user_id"]
+    if meal_supports_split_fields():
+        columns.extend(["antonio", "annalisa"])
+
+    sql = "SELECT " + ", ".join(f"meals.{column}" for column in columns) + " FROM meals"
+    params = {}
+    clauses = []
+
+    if explicit_user_id:
+        clauses.append("meals.user_id = :user_id")
+        params["user_id"] = str(explicit_user_id)
+    elif current_user_id and scope == "mine":
+        clauses.append("meals.user_id = :user_id")
+        params["user_id"] = str(current_user_id)
+
     if frm:
         try:
             frm_dt = normalize_datetime(frm)
-            q = q.filter(Meal.datetime >= frm_dt)
+            clauses.append("meals.datetime >= :from_dt")
+            params["from_dt"] = frm_dt
         except Exception:
             return jsonify({"msg": "invalid from datetime"}), 400
     if to:
         try:
             to_dt = normalize_datetime(to)
-            q = q.filter(Meal.datetime <= to_dt)
+            clauses.append("meals.datetime <= :to_dt")
+            params["to_dt"] = to_dt
         except Exception:
             return jsonify({"msg": "invalid to datetime"}), 400
     if type_id:
         try:
-            q = q.filter(Meal.type_id == UUID(type_id))
+            clauses.append("meals.type_id = :type_id")
+            params["type_id"] = str(type_id)
         except Exception:
             return jsonify({"msg": "invalid type id"}), 400
 
-    meals = q.order_by(Meal.datetime).all()
-    return jsonify([serialize_meal(m) for m in meals])
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY meals.datetime"
+
+    rows = db.session.execute(text(sql), params).fetchall()
+    return jsonify([serialize_meal_row(row) for row in rows])
 
 
 @bp.route("/copy_meals", methods=["POST"])
@@ -284,27 +399,60 @@ def copy_meals():
     except Exception:
         return jsonify({"msg": "invalid datetime format, use ISO format"}), 400
 
-    src_meals = Meal.query.filter(
-        Meal.user_id == UUID(user_id), Meal.datetime >= s_from, Meal.datetime <= s_to
-    ).all()
-    if not src_meals:
+    selected_columns = ["id", "datetime", "description", "type_id", "user_id"]
+    if meal_supports_split_fields():
+        selected_columns.extend(["antonio", "annalisa"])
+    rows = db.session.execute(
+        text(
+            f"SELECT {', '.join(selected_columns)} FROM meals WHERE user_id = :user_id AND datetime >= :s_from AND datetime <= :s_to"
+        ),
+        {"user_id": str(user_id), "s_from": s_from, "s_to": s_to},
+    ).fetchall()
+    if not rows:
         return jsonify({"copied": 0}), 200
 
     delta = d_from - s_from
     copied = 0
-    for m in src_meals:
-        new_dt = m.datetime + delta
+    for row in rows:
+        record = row._mapping if hasattr(row, "_mapping") else row
+        new_dt = record["datetime"] + delta
         if new_dt < d_from or new_dt > d_to:
             continue
-        new_meal = Meal(
-            datetime=new_dt,
-            description=m.description,
-            antonio=m.antonio,
-            annalisa=m.annalisa,
-            type_id=m.type_id,
-            user_id=UUID(user_id),
-        )
-        db.session.add(new_meal)
+
+        fields = {
+            "description": normalize_meal_text(record.get("description")),
+            "antonio": normalize_meal_text(record.get("antonio")),
+            "annalisa": normalize_meal_text(record.get("annalisa")),
+        }
+
+        if meal_supports_split_fields():
+            db.session.execute(
+                text(
+                    "INSERT INTO meals (id, datetime, description, antonio, annalisa, type_id, user_id) VALUES (:id, :dt, :description, :antonio, :annalisa, :type_id, :user_id)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "dt": new_dt,
+                    "description": fields["description"],
+                    "antonio": fields["antonio"],
+                    "annalisa": fields["annalisa"],
+                    "type_id": str(record["type_id"]),
+                    "user_id": str(user_id),
+                },
+            )
+        else:
+            db.session.execute(
+                text(
+                    "INSERT INTO meals (id, datetime, description, type_id, user_id) VALUES (:id, :dt, :description, :type_id, :user_id)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "dt": new_dt,
+                    "description": fields["description"],
+                    "type_id": str(record["type_id"]),
+                    "user_id": str(user_id),
+                },
+            )
         copied += 1
 
     db.session.commit()
