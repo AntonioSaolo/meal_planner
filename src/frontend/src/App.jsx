@@ -14,8 +14,13 @@ const API_BASE_URL = (() => {
   return 'http://localhost:8000';
 })();
 const LOCAL_STORAGE_KEY = 'meal-planner-local-meals';
+const USER_STORAGE_KEY = 'meal_planner_user';
 const TOKEN_STORAGE_KEY = 'meal_planner_token';
 const DAY_NAMES = ['Lunedì', 'Martedì', 'Mercoledì', 'Giovedì', 'Venerdì', 'Sabato', 'Domenica'];
+
+function getLocalMealsStorageKey(username = localStorage.getItem(USER_STORAGE_KEY) || 'anonymous') {
+  return `${LOCAL_STORAGE_KEY}-${username}`;
+}
 
 function startOfWeek(date) {
   const copy = new Date(date);
@@ -149,14 +154,14 @@ export default function App() {
   const [types, setTypes] = useState([]);
   const [meals, setMeals] = useState(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || '[]');
+      const saved = JSON.parse(localStorage.getItem(getLocalMealsStorageKey()) || '[]');
       return Array.isArray(saved) ? saved.map(normalizeLocalMeal) : [];
     } catch (error) {
       return [];
     }
   });
   const [modalState, setModalState] = useState({ open: false, meal: null, date: null, type: null, mode: 'edit' });
-  const [form, setForm] = useState({ id: '', type_id: '', date: '', time: '12:00', antonio: '', annalisa: '' });
+  const [form, setForm] = useState({ id: '', type_id: '', date: '', time: '12:00', antonio: '', annalisa: '', continueToNextMeal: false });
   const [isAuthenticated, setIsAuthenticated] = useState(Boolean(localStorage.getItem(TOKEN_STORAGE_KEY)));
   const [loginForm, setLoginForm] = useState({
     username: '',
@@ -174,7 +179,7 @@ export default function App() {
   }, [weekStart, isAuthenticated]);
 
   useEffect(() => {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(meals));
+    localStorage.setItem(getLocalMealsStorageKey(), JSON.stringify(meals));
   }, [meals]);
 
   async function loginWithCredentials(event) {
@@ -198,6 +203,7 @@ export default function App() {
       }
 
       localStorage.setItem(TOKEN_STORAGE_KEY, data.access_token);
+      localStorage.setItem(USER_STORAGE_KEY, loginForm.username.trim());
       setIsAuthenticated(true);
       await loadPlannerData(data.access_token);
     } catch (error) {
@@ -238,10 +244,10 @@ export default function App() {
       const response = await fetch(`${API_BASE_URL}/meals?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, { headers });
       if (!response.ok) throw new Error('Cannot load meals');
       const remoteMeals = await response.json();
-      const localMeals = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || '[]');
+      const localMeals = JSON.parse(localStorage.getItem(getLocalMealsStorageKey()) || '[]');
       setMeals(mergeRemoteMeals(Array.isArray(localMeals) ? localMeals : [], Array.isArray(remoteMeals) ? remoteMeals : []));
     } catch (error) {
-      const localMeals = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || '[]');
+      const localMeals = JSON.parse(localStorage.getItem(getLocalMealsStorageKey()) || '[]');
       setMeals(Array.isArray(localMeals) ? localMeals : []);
     }
   }
@@ -261,10 +267,9 @@ export default function App() {
     return map;
   }, [meals]);
 
-  function openModal(date, type, meal) {
-    const nextMode = meal ? 'view' : 'edit';
+  function openModal(date, type, meal, shouldContinue = false) {
     const chosenTypeId = type?.id || meal?.type_id || '';
-    setModalState({ open: true, meal, date, type, mode: nextMode });
+    setModalState({ open: true, meal, date, type, mode: 'edit' });
     setForm({
       id: meal?.id || '',
       type_id: chosenTypeId,
@@ -272,22 +277,46 @@ export default function App() {
       time: getMealTime(meal),
       antonio: meal?.antonio || '',
       annalisa: meal?.annalisa || '',
+      continueToNextMeal: Boolean(shouldContinue),
     });
-  }
-
-  function openEditMode() {
-    setModalState((current) => ({ ...current, mode: 'edit' }));
   }
 
   function closeModal() {
     setModalState({ open: false, meal: null, date: null, type: null, mode: 'edit' });
-    setForm({ id: '', type_id: '', date: '', time: '12:00', antonio: '', annalisa: '' });
+    setForm({ id: '', type_id: '', date: '', time: '12:00', antonio: '', annalisa: '', continueToNextMeal: false });
+  }
+
+  function getNextTypeForDate(date, currentTypeId) {
+    if (!date || !currentTypeId) return null;
+
+    const currentIndex = types.findIndex((type) => type.id === currentTypeId);
+    if (currentIndex < 0) return null;
+
+    const candidateType = types[currentIndex + 1];
+    if (candidateType) {
+      const dateKey = formatDateKey(date);
+      return {
+        date,
+        type: candidateType,
+        meal: mealsByDayAndType[dateKey]?.[candidateType.id] || null,
+      };
+    }
+
+    const nextDate = addDays(date, 1);
+    const firstType = types[0];
+    if (!firstType) return null;
+    const nextDateKey = formatDateKey(nextDate);
+    return {
+      date: nextDate,
+      type: firstType,
+      meal: mealsByDayAndType[nextDateKey]?.[firstType.id] || null,
+    };
   }
 
   function persistMealList(nextMeals) {
     const normalized = Array.isArray(nextMeals) ? nextMeals.map(normalizeLocalMeal) : [];
     setMeals(normalized);
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(normalized));
+    localStorage.setItem(getLocalMealsStorageKey(), JSON.stringify(normalized));
   }
 
   async function handleSaveMeal(event) {
@@ -304,7 +333,7 @@ export default function App() {
       description: [antonio, annalisa].filter(Boolean).join('\n\n'),
     };
 
-    const localMeals = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || '[]');
+    const localMeals = JSON.parse(localStorage.getItem(getLocalMealsStorageKey()) || '[]');
     const existingIndex = (Array.isArray(localMeals) ? localMeals : []).findIndex(
       (meal) => meal.id === nextMeal.id || (meal.type_id === nextMeal.type_id && meal.datetime.slice(0, 10) === nextMeal.datetime.slice(0, 10)),
     );
@@ -345,8 +374,17 @@ export default function App() {
       console.warn('Salvataggio locale non sincronizzato con il backend:', error);
     }
 
+    if (form.continueToNextMeal) {
+      const nextSlot = getNextTypeForDate(modalState.date, modalState.type?.id || form.type_id);
+      if (nextSlot) {
+        await loadMealsForWeek(weekStart);
+        openModal(nextSlot.date, nextSlot.type, nextSlot.meal, true);
+        return;
+      }
+    }
+
     closeModal();
-    loadMealsForWeek(weekStart);
+    await loadMealsForWeek(weekStart);
   }
 
   async function handleDeleteMeal() {
@@ -378,6 +416,7 @@ export default function App() {
 
   function handleLogout() {
     localStorage.removeItem(TOKEN_STORAGE_KEY);
+    localStorage.removeItem(USER_STORAGE_KEY);
     setIsAuthenticated(false);
     setTypes([]);
     setMeals([]);
@@ -689,38 +728,7 @@ export default function App() {
         </div>
       )}
 
-      {modalState.open && modalState.mode === 'view' && (
-        <div className="modal-overlay" onClick={closeModal}>
-          <div className="summary-card" onClick={(event) => event.stopPropagation()}>
-            <div className="summary-header">
-              <button type="button" className="close-button" onClick={closeModal}>
-                ×
-              </button>
-            </div>
-
-            <div className="summary-meta">
-              {modalState.date ? `${String(modalState.date.getDate()).padStart(2, '0')}/${String(modalState.date.getMonth() + 1).padStart(2, '0')}/${modalState.date.getFullYear()}` : ''} · {modalState.type?.name || 'Pasto'} · {modalState.meal ? getMealTime(modalState.meal) : '12:00'}
-            </div>
-
-            <div className="summary-text">
-              {modalState.meal ? formatMealEntries(modalState.meal) : 'Nessuna descrizione'}
-            </div>
-
-            <div className="summary-actions">
-              {modalState.meal && (
-                <button type="button" className="danger-button compact-button" onClick={handleDeleteMeal}>
-                  Cancella
-                </button>
-              )}
-              <button type="button" className="secondary-button compact-button" onClick={openEditMode}>
-                Modifica
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {modalState.open && modalState.mode !== 'view' && (
+      {modalState.open && (
         <div className="modal-overlay" onClick={closeModal}>
           <div className="modal-card" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
@@ -755,13 +763,29 @@ export default function App() {
                 />
               </label>
 
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={form.continueToNextMeal}
+                  onChange={(event) => setForm((current) => ({ ...current, continueToNextMeal: event.target.checked }))}
+                />
+                <span>Vai al pasto successivo dopo il salvataggio</span>
+              </label>
+
               <div className="modal-actions compact-actions">
-                <button type="button" className="secondary-button" onClick={closeModal}>
-                  Annulla
-                </button>
-                <button type="submit" className="primary-button">
-                  {modalState.meal ? 'Salva modifiche' : 'Aggiungi'}
-                </button>
+                {modalState.meal && (
+                  <button type="button" className="danger-button" onClick={handleDeleteMeal}>
+                    Cancella
+                  </button>
+                )}
+                <div className="actions-right">
+                  <button type="button" className="secondary-button" onClick={closeModal}>
+                    Annulla
+                  </button>
+                  <button type="submit" className="primary-button">
+                    {modalState.meal ? 'Salva modifiche' : 'Aggiungi'}
+                  </button>
+                </div>
               </div>
             </form>
           </div>

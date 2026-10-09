@@ -28,6 +28,24 @@ def normalize_meal_text(value):
     return text or None
 
 
+def build_meal_fields(payload):
+    description = normalize_meal_text(payload.get("description"))
+    antonio = normalize_meal_text(payload.get("antonio"))
+    annalisa = normalize_meal_text(payload.get("annalisa"))
+
+    if antonio is not None or annalisa is not None:
+        combined = "\n\n".join(part for part in [antonio, annalisa] if part)
+        description = combined or description
+    elif description is not None:
+        description = description
+
+    return {
+        "description": description,
+        "antonio": antonio,
+        "annalisa": annalisa,
+    }
+
+
 def serialize_meal(meal):
     antonio = normalize_meal_text(getattr(meal, "antonio", None))
     annalisa = normalize_meal_text(getattr(meal, "annalisa", None))
@@ -134,35 +152,28 @@ def post_meal():
     data = request.get_json() or {}
     mid = data.get("id")
     dt = data.get("datetime")
-    description = normalize_meal_text(data.get("description"))
-    antonio = normalize_meal_text(data.get("antonio"))
-    annalisa = normalize_meal_text(data.get("annalisa"))
     type_id = data.get("type_id")
     user_id = get_jwt_identity()
+    fields = build_meal_fields(data)
+    description = fields["description"]
+    antonio = fields["antonio"]
+    annalisa = fields["annalisa"]
 
     if not dt or not type_id:
         return jsonify({"msg": "datetime and type_id are required"}), 400
-
-    if antonio is None and description is not None:
-        antonio = description
-    if annalisa is None and description is not None and description.count("\n") > 0:
-        parts = [part.strip() for part in description.split("\n\n") if part.strip()]
-        if len(parts) > 1:
-            annalisa = parts[-1]
-            antonio = parts[0]
 
     try:
         parsed = normalize_datetime(dt)
     except Exception:
         return jsonify({"msg": "invalid datetime format, use ISO format"}), 400
 
-    combined_description = "\n\n".join(part for part in [antonio, annalisa] if part)
-
     if mid:
         meal = Meal.query.get(mid)
+        if meal and str(meal.user_id) != str(user_id):
+            return jsonify({"msg": "forbidden"}), 403
         if meal:
             meal.datetime = parsed
-            meal.description = combined_description or description
+            meal.description = description
             meal.antonio = antonio
             meal.annalisa = annalisa
             meal.type_id = UUID(type_id)
@@ -170,7 +181,7 @@ def post_meal():
             meal = Meal(
                 id=UUID(mid),
                 datetime=parsed,
-                description=combined_description or description,
+                description=description,
                 antonio=antonio,
                 annalisa=annalisa,
                 type_id=UUID(type_id),
@@ -180,7 +191,7 @@ def post_meal():
     else:
         meal = Meal(
             datetime=parsed,
-            description=combined_description or description,
+            description=description,
             antonio=antonio,
             annalisa=annalisa,
             type_id=UUID(type_id),
@@ -196,11 +207,14 @@ def post_meal():
 @jwt_required()
 def delete_meal():
     mid = request.args.get("id")
+    user_id = get_jwt_identity()
     if not mid:
         return jsonify({"msg": "id required"}), 400
     meal = Meal.query.get(mid)
     if not meal:
         return jsonify({"msg": "not found"}), 404
+    if str(meal.user_id) != str(user_id):
+        return jsonify({"msg": "forbidden"}), 403
     db.session.delete(meal)
     db.session.commit()
     return jsonify({"msg": "deleted"}), 200
@@ -218,12 +232,16 @@ def get_meal():
 
 
 @bp.route("/meals", methods=["GET"])
+@jwt_required(optional=True)
 def list_meals():
     frm = request.args.get("from")
     to = request.args.get("to")
     type_id = request.args.get("type")
+    current_user_id = get_jwt_identity()
 
     q = Meal.query
+    if current_user_id:
+        q = q.filter(Meal.user_id == UUID(current_user_id))
     if frm:
         try:
             frm_dt = normalize_datetime(frm)

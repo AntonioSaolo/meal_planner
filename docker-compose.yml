@@ -27,7 +27,7 @@ services:
         condition: service_healthy
     environment:
       PORT: "8000"
-      DATABASE_URL: postgresql://meal_user:meal_password@db:5432/meal_db
+      DATABASE_URL: postgresql+psycopg2://meal_user:meal_password@db:5432/meal_db
       POSTGRES_USER: meal_user
       POSTGRES_PASSWORD: meal_password
       POSTGRES_HOST: db
@@ -35,9 +35,9 @@ services:
       POSTGRES_DB: meal_db
       SECRET_KEY: change-me
       JWT_SECRET_KEY: change-me
-      DEFAULT_USER_USERNAME: meal_user
-      DEFAULT_USER_PASSWORD: meal_user
-      DEFAULT_USER_EMAIL: meal_user@example.com
+      DEFAULT_USER_USERNAME: admin
+      DEFAULT_USER_PASSWORD: admin
+      DEFAULT_USER_EMAIL: admin@example.com
     ports:
       - "8000:8000"
     restart: unless-stopped

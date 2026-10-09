@@ -17,10 +17,16 @@ if ENV_PATH.exists():
     load_dotenv(dotenv_path=str(ENV_PATH))
 
 
+def normalize_database_url(raw_url):
+    if raw_url and raw_url.startswith("postgresql://"):
+        return raw_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return raw_url
+
+
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY") or "change-me"
     JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY") or SECRET_KEY
-    SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL")
+    SQLALCHEMY_DATABASE_URI = normalize_database_url(os.environ.get("DATABASE_URL"))
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
     @staticmethod
@@ -31,4 +37,6 @@ class Config:
         host = os.environ.get("POSTGRES_HOST", "db")
         port = os.environ.get("POSTGRES_PORT", "5432")
         dbname = os.environ.get("POSTGRES_DB", "meal_db")
-        return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+        return normalize_database_url(
+            f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+        )

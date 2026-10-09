@@ -1,5 +1,5 @@
 from flask import Flask, request, send_from_directory
-from .config import Config
+from .config import Config, normalize_database_url
 from .extensions import db, jwt
 from sqlalchemy import text
 from pathlib import Path
@@ -14,6 +14,10 @@ def create_app():
     # ensure DATABASE_URL is available (config handles loading .env)
     if not app.config.get("SQLALCHEMY_DATABASE_URI"):
         app.config["SQLALCHEMY_DATABASE_URI"] = Config.build_database_url()
+    else:
+        app.config["SQLALCHEMY_DATABASE_URI"] = normalize_database_url(
+            app.config["SQLALCHEMY_DATABASE_URI"]
+        )
 
     def set_cors_headers(response):
         origin = request.headers.get("Origin")

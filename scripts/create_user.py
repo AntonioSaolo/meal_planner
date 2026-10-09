@@ -16,15 +16,20 @@ Note: The script stores a salted password hash using Werkzeug's `generate_passwo
 """
 
 import os
+import sys
 import argparse
 import uuid
-import os
 from getpass import getpass
-import argparse
-import psycopg2
-from psycopg2 import sql
-from psycopg2.extras import register_uuid
 from pathlib import Path
+
+try:
+    import psycopg2 as pg_driver
+    from psycopg2.extras import register_uuid
+except ModuleNotFoundError:
+    import psycopg as pg_driver
+
+    register_uuid = None
+
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash
 
@@ -75,19 +80,31 @@ def user_exists(conn, username):
     return row[0] if row else None
 
 
-def insert_user(conn, username, password, email=None):
-    register_uuid()
+def upsert_user(conn, username, password, email=None):
+    if register_uuid is not None:
+        register_uuid()
     cur = conn.cursor()
-    user_id = uuid.uuid4()
+    user_id = user_exists(conn, username)
     pw_hash = generate_password_hash(password)
     try:
+        if user_id:
+            cur.execute(
+                "UPDATE users SET password_hash = %s, email = %s WHERE id = %s",
+                (pw_hash, email, user_id),
+            )
+            conn.commit()
+            print(f"Updated user '{username}' (id={user_id})")
+            return user_id
+
+        user_id = uuid.uuid4()
         cur.execute(
             "INSERT INTO users (id, username, password_hash, email, avatar_url) VALUES (%s, %s, %s, %s, %s)",
             (user_id, username, pw_hash, email, None),
         )
         conn.commit()
         print(f"Created user '{username}' with id {user_id}")
-    except psycopg2.IntegrityError as e:
+        return user_id
+    except Exception as e:
         conn.rollback()
         print("Failed to create user: integrity error", e)
         raise
@@ -139,18 +156,13 @@ def main(argv=None):
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
 
-    conn = psycopg2.connect(database_url)
+    conn = pg_driver.connect(database_url)
 
     try:
         if args.create_table:
             create_users_table_if_missing(conn)
 
-        exists = user_exists(conn, username)
-        if exists:
-            print(f"User '{username}' already exists (id={exists}). Aborting.")
-            return
-
-        insert_user(conn, username, password, email=email)
+        upsert_user(conn, username, password, email=email)
     finally:
         conn.close()
 
